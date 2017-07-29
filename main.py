@@ -24,9 +24,6 @@ prop_df = pd.read_csv("../data/properties_2016.csv")
 # merge property to data
 train_df = pd.merge(train_df, prop_df, on='parcelid', how='left')
 
-# fill missing values
-mean_values = train_df.mean(axis=0)
-
 # some manual truncation
 ulimit = np.percentile(train_df.logerror.values, 99)
 llimit = np.percentile(train_df.logerror.values, 1)
@@ -55,28 +52,64 @@ train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
 train_y = train_df['logerror'].values
 cat_cols = ["hashottuborspa", "propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
 train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate', 'transaction_month']+cat_cols, axis=1)
-feat_names = train_df.columns.values
+train_df = train_df.loc[:, (train_df != train_df.ix[0]).any()]
+feat_names = train_df.columns
+
+# fill missing values
+mean_values = train_df.mean(axis=0)
+train_df.fillna(mean_values, inplace=True)
 
 # make test dataset
 test_df = pd.read_csv("../data/sample_submission.csv")
 test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
 test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
-test_df.fillna(mean_values, inplace=True)
-test_df = test_df.drop(['201610', '201611', '201612', '201710', '201711', '201712'], axis=1)
 test_id = test_df['parcelid']
-test_df = test_df.drop(['parcelid'] + cat_cols, axis=1)
+test_df = test_df.loc[:, feat_names]
+test_df.fillna(mean_values, inplace=True)
 
 # normalize data
 train_df_mean = train_df.mean()
-train_df_std = train_df.std()
+train_df_std = train_df.std() + 1.0e-9
 train_y_mean = train_y.mean()
-train_y_std = train_y.std()
+train_y_std = train_y.std() + 1.0e-9
 train_df_n = (train_df - train_df_mean) / train_df_std
 train_y_n = (train_y - train_y_mean) / train_y_std
 test_df_n = (test_df - train_df_mean) / train_df_std
 
 ## learning
 print('learning')
+
+# extreme trees
+print('extrees')
+from sklearn.ensemble import ExtraTreesRegressor
+
+extree_model = ExtraTreesRegressor(n_estimators=10, max_features=32,
+                                   random_state=0)
+
+extree_model.fit(train_df_n.as_matrix(), train_y_n)
+
+extree_pred = extree_model.predict(test_df_n)
+
+extree_y_pred=[]
+
+for i,predict in enumerate(extree_pred):
+    extree_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
+extree_y_pred=np.array(extree_y_pred)
+
+extree_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
+                           '201610': extree_y_pred, '201611': extree_y_pred, '201612': extree_y_pred,
+                           '201710': extree_y_pred, '201711': extree_y_pred, '201712': extree_y_pred})
+
+# set col 'ParceID' to first col
+cols = extree_output.columns.tolist()
+cols = cols[-1:] + cols[:-1]
+extree_output = extree_output[cols]
+
+#output
+extree_output.to_csv('./extree_output.csv', index=False)
+
+# xgboost
+print('xgboost')
 import xgboost as xgb
 xgb_params = {
     'eta': 0.05,
@@ -90,26 +123,46 @@ xgb_params = {
 dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df.columns.values)
 dtest = xgb.DMatrix(test_df_n)
 
-model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
+xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
 
-## inference
-print('inference')
-xgb_pred = model.predict(dtest)
+xgb_pred = xgb_model.predict(dtest)
 
-y_pred=[]
+xgb_y_pred=[]
 
 for i,predict in enumerate(xgb_pred):
-    y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
-y_pred=np.array(y_pred)
+    xgb_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
+xgb_y_pred=np.array(xgb_y_pred)
 
-output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
-        '201610': y_pred, '201611': y_pred, '201612': y_pred,
-        '201710': y_pred, '201711': y_pred, '201712': y_pred})
+xgb_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
+                           '201610': xgb_y_pred, '201611': xgb_y_pred, '201612': xgb_y_pred,
+                           '201710': xgb_y_pred, '201711': xgb_y_pred, '201712': xgb_y_pred})
 
 # set col 'ParceID' to first col
-cols = output.columns.tolist()
+cols = xgb_output.columns.tolist()
 cols = cols[-1:] + cols[:-1]
-output = output[cols]
+xgb_output = xgb_output[cols]
 
 #output
-output.to_csv('../results/submission_normalize.csv', index=False)
+xgb_output.to_csv('./xgb_output.csv', index=False)
+
+## ensenble results
+print('ensemble results')
+ens_pred = 0.5 * xgb_pred + 0.5 * extree_pred
+
+ens_y_pred=[]
+
+for i,predict in enumerate(ens_pred):
+    ens_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
+ens_y_pred=np.array(ens_y_pred)
+
+ens_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
+                           '201610': ens_y_pred, '201611': ens_y_pred, '201612': ens_y_pred,
+                           '201710': ens_y_pred, '201711': ens_y_pred, '201712': ens_y_pred})
+
+# set col 'ParceID' to first col
+cols = ens_output.columns.tolist()
+cols = cols[-1:] + cols[:-1]
+ens_output = ens_output[cols]
+
+#output
+ens_output.to_csv('../results/submission_ensenble.csv', index=False)
