@@ -16,6 +16,7 @@ from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVR
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import KFold
 #from sklearn.linear_model import RidgeCV
 
 color = sns.color_palette()
@@ -109,9 +110,6 @@ if __name__ == "__main__":
     train_y_n = (train_y - train_y_mean) / train_y_std
     test_df_n = (test_df - train_df_mean) / train_df_std
 
-    ## learning
-    print('learning')
-
     # Fit estimators
     ESTIMATORS = {
         "adaboost": AdaBoostRegressor(),
@@ -125,6 +123,110 @@ if __name__ == "__main__":
         #"kernel_ridge": KernelRidge(alpha=1.0),
     }
 
+    # stacking approach
+    print('train data stacking')
+    if os.path.isfile(single_results_dir + 'train_features_output.npy'):
+        print('read from file')
+        train_features = np.load(single_results_dir + 'train_features_output.npy')
+    else:
+        # split data
+        rs = KFold(n_splits=5)
+        # rid = np.random.permutation(train_df.shape[0])
+        # split_id = [
+        #     (rid[int(len(rid) / 2):], rid[:int(len(rid) / 2)]),
+        #     (rid[:int(len(rid) / 2)], rid[int(len(rid) / 2):])
+        # ]
+
+        # feature extraction
+        train_features = np.zeros([train_df_n.shape[0], len(ESTIMATORS) + 1])
+        # for train_id_s, test_id_s in split_id:
+        for train_id_s, test_id_s in rs.split(train_df_n):
+            train_df_s = train_df_n.iloc[train_id_s,:]
+            train_y_s = train_y_n[train_id_s]
+            test_df_s = train_df_n.iloc[test_id_s,:]
+
+            preds_s = []
+            for name, estimator in ESTIMATORS.items():
+                print(name)
+                stime = time.time()
+                estimator.fit(train_df_s.as_matrix(), train_y_s)
+                print("Time for {} fitting: {:03f}".format(name, time.time() - stime))
+                pred = estimator.predict(test_df_s)
+                preds_s.append(pred)
+
+            # xgboost
+            print('xgboost')
+            xgb_params = {
+                'eta': 0.05,
+                'max_depth': 8,
+                'subsample': 0.7,
+                'colsample_bytree': 0.7,
+                'objective': 'reg:linear',
+                'silent': 1,
+                'seed' : 0
+            }
+            dtrain = xgb.DMatrix(train_df_s, train_y_s, feature_names=train_df.columns.values)
+            dtest = xgb.DMatrix(test_df_s)
+            stime = time.time()
+            xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
+            print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
+            preds_s.append(xgb_model.predict(dtest))
+
+            preds_s = np.stack(preds_s, axis=1)
+            train_features[test_id_s,:] = preds_s
+            # for idx in range(preds_s.shape[0]):
+            #     train_features.append(preds_s[idx,:])
+
+        # train_features = np.stack(train_features, axis=0)
+        # train_features = train_features[np.argsort(rid),:]
+        np.save(single_results_dir + 'train_features_output.npy', train_features)
+    train_features = pd.DataFrame(train_features)
+
+    print('test data stacking')
+    if os.path.isfile(single_results_dir + 'test_features_output.npy'):
+        print('read from file')
+        test_features = np.load(single_results_dir + 'test_features_output.npy')
+    else:
+        test_features = []
+        preds_s = []
+        for name, estimator in ESTIMATORS.items():
+            print(name)
+            stime = time.time()
+            estimator.fit(train_df_n.as_matrix(), train_y_n)
+            print("Time for {} fitting: {:03f}".format(name, time.time() - stime))
+            pred = estimator.predict(test_df_n)
+            preds_s.append(pred)
+
+        # xgboost
+        print('xgboost')
+        xgb_params = {
+            'eta': 0.05,
+            'max_depth': 8,
+            'subsample': 0.7,
+            'colsample_bytree': 0.7,
+            'objective': 'reg:linear',
+            'silent': 1,
+            'seed' : 0
+        }
+        dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df_n.columns.values)
+        dtest = xgb.DMatrix(test_df_n)
+        stime = time.time()
+        xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
+        print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
+        pred = xgb_model.predict(dtest)
+        preds_s.append(pred)
+
+        preds_s = np.stack(preds_s, axis=1)
+        for idx in range(preds_s.shape[0]):
+            test_features.append(preds_s[idx,:])
+        test_features = np.stack(test_features, axis=0)
+        np.save(single_results_dir + 'test_features_output.npy', test_features)
+    test_features = pd.DataFrame(test_features)
+
+    ## learning
+    print('learning')
+    train_df_n = pd.concat([train_df_n, train_features], axis=1)
+    test_df_n = pd.concat([test_df_n, test_features], axis=1)
     preds = dict()
     for name, estimator in ESTIMATORS.items():
         print(name)
@@ -142,35 +244,6 @@ if __name__ == "__main__":
             output = make_output(preds[name], train_y_mean, train_y_std, test_id)
             output.to_csv(single_results_dir + '{}_output.csv'.format(name), index=False)
 
-
-    # # extreme trees
-    # print('extrees')
-
-    # extree_model = ExtraTreesRegressor(n_estimators=10, max_features=32,
-    #                                    random_state=0)
-
-    # extree_model.fit(train_df_n.as_matrix(), train_y_n)
-
-    # extree_pred = extree_model.predict(test_df_n)
-
-    # extree_y_pred=[]
-
-    # for i,predict in enumerate(extree_pred):
-    #     extree_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
-    #     extree_y_pred=np.array(extree_y_pred)
-
-    # extree_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
-    #                               '201610': extree_y_pred, '201611': extree_y_pred, '201612': extree_y_pred,
-    #                               '201710': extree_y_pred, '201711': extree_y_pred, '201712': extree_y_pred})
-
-    # # set col 'ParceID' to first col
-    # cols = extree_output.columns.tolist()
-    # cols = cols[-1:] + cols[:-1]
-    # extree_output = extree_output[cols]
-
-    # #output
-    # extree_output.to_csv('./extree_output.csv', index=False)
-
     # xgboost
     print('xgboost')
     if os.path.isfile(single_results_dir + 'xgb_output.npy'):
@@ -186,26 +259,13 @@ if __name__ == "__main__":
             'silent': 1,
             'seed' : 0
         }
-        dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df.columns.values)
+        dtrain = xgb.DMatrix(train_df_n, train_y_n)
+        # dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df_n.columns.values)
         dtest = xgb.DMatrix(test_df_n)
         stime = time.time()
         xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
         print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
         xgb_pred = xgb_model.predict(dtest)
-        # xgb_y_pred=[]
-
-        # for i,predict in enumerate(xgb_pred):
-        #     xgb_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
-        #     xgb_y_pred=np.array(xgb_y_pred)
-
-        # xgb_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
-        #                            '201610': xgb_y_pred, '201611': xgb_y_pred, '201612': xgb_y_pred,
-        #                            '201710': xgb_y_pred, '201711': xgb_y_pred, '201712': xgb_y_pred})
-
-        # # set col 'ParceID' to first col
-        # cols = xgb_output.columns.tolist()
-        # cols = cols[-1:] + cols[:-1]
-        # xgb_output = xgb_output[cols]
 
         #output
         np.save(single_results_dir + 'xgb_output.npy', xgb_pred)
@@ -218,20 +278,6 @@ if __name__ == "__main__":
     for name, pred in preds.items():
         ens_pred += pred
     ens_pred /= 1 + len(preds)
-    # ens_y_pred=[]
-
-    # for i,predict in enumerate(ens_pred):
-    #     ens_y_pred.append(str(round(predict * train_y_std + train_y_mean,4)))
-    #     ens_y_pred=np.array(ens_y_pred)
-
-    # ens_output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
-    #                            '201610': ens_y_pred, '201611': ens_y_pred, '201612': ens_y_pred,
-    #                            '201710': ens_y_pred, '201711': ens_y_pred, '201712': ens_y_pred})
-
-    # # set col 'ParceID' to first col
-    # cols = ens_output.columns.tolist()
-    # cols = cols[-1:] + cols[:-1]
-    # ens_output = ens_output[cols]
 
     #output
     ens_output = make_output(ens_pred, train_y_mean, train_y_std, test_id)
