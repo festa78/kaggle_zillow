@@ -40,6 +40,32 @@ def make_output(pred, train_y_mean, train_y_std, test_id):
     output = output[cols]
     return output
 
+def make_output_month(pred, train_y_mean, train_y_std, test_id):
+    y_pred_10 = []
+    y_pred_11 = []
+    y_pred_12 = []
+    for i in range(0, pred.shape[0], 3):
+        y_pred_10.append(str(round(pred[i] * train_y_std + train_y_mean,4)))
+        y_pred_11.append(str(round(pred[i+1] * train_y_std + train_y_mean,4)))
+        y_pred_12.append(str(round(pred[i+2] * train_y_std + train_y_mean,4)))
+    y_pred_10=np.array(y_pred_10)
+    y_pred_11=np.array(y_pred_11)
+    y_pred_12=np.array(y_pred_12)
+
+    # print(pred.shape[0])
+    # print(test_id.shape)
+    # print(y_pred_10.shape)
+    # print(y_pred_11.shape)
+    # print(y_pred_12.shape)
+    output = pd.DataFrame({'ParcelId': test_id.astype(np.int32),
+                           '201610': y_pred_10, '201611': y_pred_11, '201612': y_pred_12,
+                           '201710': y_pred_10, '201711': y_pred_11, '201712': y_pred_12})
+
+    # set col 'ParceID' to first col
+    cols = output.columns.tolist()
+    cols = cols[-1:] + cols[:-1]
+    output = output[cols]
+    return output
 
 if __name__ == "__main__":
     ## preprocessing
@@ -84,7 +110,8 @@ if __name__ == "__main__":
     # drop categorical values
     train_y = train_df['logerror'].values
     cat_cols = ["hashottuborspa", "propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
-    train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate', 'transaction_month']+cat_cols, axis=1)
+    #train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate', 'transaction_month']+cat_cols, axis=1)
+    train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate']+cat_cols, axis=1)
     #train_df = train_df.loc[:, (train_df != train_df.ix[0]).any()]
     train_df = train_df.loc[:, (train_df != train_df.iloc[0]).any()]
     feat_names = train_df.columns
@@ -94,13 +121,37 @@ if __name__ == "__main__":
     train_df.fillna(mean_values, inplace=True)
 
     # make test dataset
-    test_df = pd.read_csv("../data/sample_submission.csv")
-    test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
-    test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
-    test_id = test_df['parcelid']
-    test_df = test_df.loc[:, feat_names]
-    test_df.fillna(mean_values, inplace=True)
+    if os.path.isfile(single_results_dir + 'test_df.pkl'):
+        print('read from file')
 
+        # read parcelid
+        test_df = pd.read_csv("../data/sample_submission.csv")
+        test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
+        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_id = test_df['parcelid']
+
+        # read others
+        test_df = pd.read_pickle(single_results_dir + 'test_df.pkl')
+    else:
+        test_df = pd.read_csv("../data/sample_submission.csv")
+        test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
+        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_id = test_df['parcelid']
+        test_df = test_df.loc[:, feat_names]
+        test_df.fillna(mean_values, inplace=True)
+        # consider monthly estimation
+        test_df_m = []
+        for i in range(test_df.shape[0]):
+            for m in range(10,13):
+                test_tmp = test_df.iloc[i,:]
+                test_tmp['transaction_month'] = m
+                test_df_m.append(test_tmp)
+        test_df = pd.concat(test_df_m, axis=1).T
+        test_df.to_pickle(single_results_dir + 'test_df.pkl')
+    test_df = test_df.reset_index(drop=True)
+
+    print(train_df.shape)
+    print(test_df.shape)
     # normalize data
     train_df_mean = train_df.mean()
     train_df_std = train_df.std() + 1.0e-9
@@ -180,7 +231,7 @@ if __name__ == "__main__":
         # train_features = np.stack(train_features, axis=0)
         # train_features = train_features[np.argsort(rid),:]
         np.save(single_results_dir + 'train_features_output.npy', train_features)
-    train_features = pd.DataFrame(train_features)
+    train_features = pd.DataFrame(train_features, columns=np.arange(0,-train_features.shape[1], -1))
 
     print('test data stacking')
     if os.path.isfile(single_results_dir + 'test_features_output.npy'):
@@ -208,7 +259,7 @@ if __name__ == "__main__":
             'silent': 1,
             'seed' : 0
         }
-        dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df_n.columns.values)
+        dtrain = xgb.DMatrix(train_df_n, train_y_n)
         dtest = xgb.DMatrix(test_df_n)
         stime = time.time()
         xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
@@ -221,12 +272,14 @@ if __name__ == "__main__":
             test_features.append(preds_s[idx,:])
         test_features = np.stack(test_features, axis=0)
         np.save(single_results_dir + 'test_features_output.npy', test_features)
-    test_features = pd.DataFrame(test_features)
+    test_features = pd.DataFrame(test_features, columns=np.arange(0,-test_features.shape[1], -1))
 
     ## learning
     print('learning')
-    train_df_n = pd.concat([train_df_n, train_features], axis=1)
-    test_df_n = pd.concat([test_df_n, test_features], axis=1)
+    # train_df_n = pd.concat([train_df_n, train_features], axis=1)
+    # test_df_n = pd.concat([test_df_n, test_features], axis=1)
+    #train_df_n = train_features
+    #test_df_n = test_features
     preds = dict()
     for name, estimator in ESTIMATORS.items():
         print(name)
@@ -241,7 +294,8 @@ if __name__ == "__main__":
 
             #output
             np.save(single_results_dir + '{}_output.npy'.format(name), preds[name])
-            output = make_output(preds[name], train_y_mean, train_y_std, test_id)
+            #output = make_output(preds[name], train_y_mean, train_y_std, test_id)
+            output = make_output_month(preds[name], train_y_mean, train_y_std, test_id)
             output.to_csv(single_results_dir + '{}_output.csv'.format(name), index=False)
 
     # xgboost
@@ -269,16 +323,24 @@ if __name__ == "__main__":
 
         #output
         np.save(single_results_dir + 'xgb_output.npy', xgb_pred)
-        xgb_output = make_output(xgb_pred, train_y_mean, train_y_std, test_id)
+        #xgb_output = make_output(xgb_pred, train_y_mean, train_y_std, test_id)
+        xgb_output = make_output_month(xgb_pred, train_y_mean, train_y_std, test_id)
         xgb_output.to_csv(single_results_dir + 'xgb_output.csv', index=False)
+
+    ## resnet results
+    print('resnet')
+    print('read from file')
+    resnet_pred = np.load(single_results_dir + 'resnet_output.npy')
 
     ## ensenble results
     print('ensemble results')
     ens_pred = xgb_pred
+    ens_pred += resnet_pred
     for name, pred in preds.items():
         ens_pred += pred
-    ens_pred /= 1 + len(preds)
+    ens_pred /= 2 + len(preds)
 
     #output
-    ens_output = make_output(ens_pred, train_y_mean, train_y_std, test_id)
+    #ens_output = make_output(ens_pred, train_y_mean, train_y_std, test_id)
+    ens_output = make_output_month(ens_pred, train_y_mean, train_y_std, test_id)
     ens_output.to_csv('../results/submission_ensenble.csv', index=False)
