@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import os
+import glob
+import re
+import math
+from tqdm import tqdm
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.ensemble import GradientBoostingRegressor
@@ -17,7 +21,19 @@ from sklearn.svm import SVR
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import KFold
+import torch
+import torch.autograd
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.utils.data as data_utils
+import torchvision.models as models
+from torch.autograd import Variable
+
 #from sklearn.linear_model import RidgeCV
+from main_dnn import resnet18_1d
+from main_dnn import natural_keys
+
 
 color = sns.color_palette()
 pd.options.mode.chained_assignment = None
@@ -67,6 +83,86 @@ def make_output_month(pred, train_y_mean, train_y_std, test_id):
     output = output[cols]
     return output
 
+
+def resnet_learn(train_loader, model, optimizer, basename):
+    num_epoch = 5000
+    save_epoch = 100
+    start_epoch = 0
+    save_path = 'dnn_results/'
+    loss_best = float("Inf")
+    # resume
+    lt = glob.glob(save_path + '{}_ckpt_*'.format(basename))
+    if lt:
+        print('resume')
+        lt.sort(key=natural_keys)
+        load_status = torch.load(lt[-1])
+        start_epoch = load_status['epoch'] - 1
+        model.load_state_dict(load_status['state_dict'])
+        model_best = load_status['model_best']
+        optimizer.load_state_dict(load_status['optimizer'])
+
+    for ep in range(start_epoch, num_epoch):
+        loss_total = 0.
+        batch_total = np.ceil(len(train_loader.dataset) / train_loader.batch_size).astype('int')
+        _tqdm = dict(total=batch_total)
+
+        for batch_idx, (batch_x, batch_y) in tqdm(enumerate(train_loader), **_tqdm):
+            # Get data
+            batch_x = Variable(batch_x.type(torch.FloatTensor).cuda())
+            batch_y = Variable(batch_y.type(torch.FloatTensor).cuda())
+
+            # Reset gradients
+            model.zero_grad()
+
+            # Forward pass
+            batch_x = batch_x.view(batch_x.size()[0],batch_x.size()[1],1)
+            batch_x = batch_x.permute(0,2,1)
+            batch_y = batch_y.view(batch_y.size()[0],batch_y.size()[1],1)
+            batch_y = batch_y.permute(0,2,1)
+            output = F.smooth_l1_loss(model(batch_x), batch_y)
+            loss = output.data[0]
+
+            # Backward pass
+            output.backward()
+
+            # Apply gradients
+            optimizer.step()
+
+            loss_total += loss
+        # save model
+        if (ep + 1) % save_epoch == 0:
+            print('model save')
+            if loss < loss_best:
+                loss_best = loss
+                model_best = model
+            save_status = {
+                'epoch': ep + 1,
+                'state_dict': model.state_dict(),
+                'model_best': model_best,
+                'optimizer' : optimizer.state_dict(),
+            }
+            torch.save(save_status, save_path + '{}_ckpt_{:08d}.pth.tar'.format(basename, ep))
+
+    return model_best
+
+
+def resnet_pred(model, test_df_n):
+    pred_all = np.zeros((test_df_n.shape[0], 1))
+    test_batch_size = 30
+    batch_total = np.ceil(pred_all.shape[0] / test_batch_size).astype('int')
+    _tqdm = dict(total=batch_total)
+    for bid in tqdm(range(0, pred_all.shape[0], test_batch_size)):
+        test_x_th = torch.from_numpy(test_df_n.values[bid:min(bid+test_batch_size, pred_all.shape[0]),]).type(torch.FloatTensor)
+        test_x_th = Variable(test_x_th.cuda())
+        test_x_th = test_x_th.view(test_x_th.size()[0], test_x_th.size()[1], 1)
+        test_x_th = test_x_th.permute(0,2,1)
+        pred = model(test_x_th).cpu().data.numpy()
+        pred_all[bid:min(bid+test_batch_size, pred_all.shape[0])] = pred
+    pred_all = np.squeeze(pred_all)
+    print('pred', pred_all.shape)
+    return pred_all
+
+
 if __name__ == "__main__":
     ## preprocessing
     print('preprocessing')
@@ -88,24 +184,6 @@ if __name__ == "__main__":
     llimit = np.percentile(train_df.logerror.values, 1)
     train_df['logerror'].loc[train_df['logerror']>ulimit] = ulimit
     train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
-
-    # col = "finishedsquarefeet12"
-    # ulimit = np.percentile(train_df[col].values, 99.5)
-    # llimit = np.percentile(train_df[col].values, 0.5)
-    # train_df[col].loc[train_df[col]>ulimit] = ulimit
-    # train_df[col].loc[train_df[col]<llimit] = llimit
-
-    # col = "calculatedfinishedsquarefeet"
-    # ulimit = np.percentile(train_df[col].values, 99.5)
-    # llimit = np.percentile(train_df[col].values, 0.5)
-    # train_df[col].loc[train_df[col]>ulimit] = ulimit
-    # train_df[col].loc[train_df[col]<llimit] = llimit
-
-    # col = "taxamount"
-    # ulimit = np.percentile(train_df[col].values, 99.5)
-    # llimit = np.percentile(train_df[col].values, 0.5)
-    # train_df[col].loc[train_df[col]>ulimit] = ulimit
-    # train_df[col].loc[train_df[col]<llimit] = llimit
 
     # drop categorical values
     train_y = train_df['logerror'].values
@@ -182,14 +260,10 @@ if __name__ == "__main__":
     else:
         # split data
         rs = KFold(n_splits=5)
-        # rid = np.random.permutation(train_df.shape[0])
-        # split_id = [
-        #     (rid[int(len(rid) / 2):], rid[:int(len(rid) / 2)]),
-        #     (rid[:int(len(rid) / 2)], rid[int(len(rid) / 2):])
-        # ]
 
         # feature extraction
         train_features = np.zeros([train_df_n.shape[0], len(ESTIMATORS) + 1])
+        count = 0
         # for train_id_s, test_id_s in split_id:
         for train_id_s, test_id_s in rs.split(train_df_n):
             train_df_s = train_df_n.iloc[train_id_s,:]
@@ -197,6 +271,7 @@ if __name__ == "__main__":
             test_df_s = train_df_n.iloc[test_id_s,:]
 
             preds_s = []
+
             for name, estimator in ESTIMATORS.items():
                 print(name)
                 stime = time.time()
@@ -223,15 +298,38 @@ if __name__ == "__main__":
             print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
             preds_s.append(xgb_model.predict(dtest))
 
+            # resnet
+            # print('resnet')
+            # # pytorch format
+            # train_x_th = torch.from_numpy(train_df_s.values).type(torch.FloatTensor)
+            # train_y_th = torch.from_numpy(train_y_s).type(torch.FloatTensor)
+            # train_y_th = train_y_th.view(train_y_th.size()[0], 1)
+            # train_y_th = torch.from_numpy(train_y_s[:,np.newaxis])
+            # train = data_utils.TensorDataset(train_x_th, train_y_th)
+            # train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
+
+            # model = resnet18_1d(in_channels=1, num_classes=1)
+            # model.cuda()
+            # optimizer = optim.Adam(model.parameters(), lr=1.e-4)
+            # model = resnet_learn(train_loader, model, optimizer, 'train_feature_{:d}'.format(count))
+            # count += 1
+            # preds_s.append(resnet_pred(model, test_df_s))
+
             preds_s = np.stack(preds_s, axis=1)
             train_features[test_id_s,:] = preds_s
-            # for idx in range(preds_s.shape[0]):
-            #     train_features.append(preds_s[idx,:])
 
         # train_features = np.stack(train_features, axis=0)
         # train_features = train_features[np.argsort(rid),:]
         np.save(single_results_dir + 'train_features_output.npy', train_features)
     train_features = pd.DataFrame(train_features, columns=np.arange(0,-train_features.shape[1], -1))
+
+    # linear regression of ensemble weight parameters
+    lr = LinearRegression()
+    lr.fit(train_features.values, train_y_n)
+    ens_weight = lr.coef_
+    print('feature size', train_features.shape)
+    print('ens_weight size', ens_weight.shape[0])
+    assert(ens_weight.shape[0] == len(ESTIMATORS) + 1)
 
     print('test data stacking')
     if os.path.isfile(single_results_dir + 'test_features_output.npy'):
@@ -267,6 +365,22 @@ if __name__ == "__main__":
         pred = xgb_model.predict(dtest)
         preds_s.append(pred)
 
+        # resnet
+        print('resnet')
+        # pytorch format
+        train_x_th = torch.from_numpy(train_df_n.values).type(torch.FloatTensor)
+        train_y_th = torch.from_numpy(train_y_n).type(torch.FloatTensor)
+        train_y_th = train_y_th.view(train_y_th.size()[0], 1)
+        train_y_th = torch.from_numpy(train_y_n[:,np.newaxis])
+        train = data_utils.TensorDataset(train_x_th, train_y_th)
+        train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
+
+        model = resnet18_1d(in_channels=1, num_classes=1)
+        model.cuda()
+        optimizer = optim.Adam(model.parameters(), lr=1.e-4)
+        model = resnet_learn(train_loader, model, optimizer, 'test_feature')
+        preds_s.append(resnet_pred(model, test_df_n))
+
         preds_s = np.stack(preds_s, axis=1)
         for idx in range(preds_s.shape[0]):
             test_features.append(preds_s[idx,:])
@@ -278,8 +392,8 @@ if __name__ == "__main__":
     print('learning')
     # train_df_n = pd.concat([train_df_n, train_features], axis=1)
     # test_df_n = pd.concat([test_df_n, test_features], axis=1)
-    #train_df_n = train_features
-    #test_df_n = test_features
+    train_df_n = train_features
+    test_df_n = test_features
     preds = dict()
     for name, estimator in ESTIMATORS.items():
         print(name)
@@ -328,17 +442,37 @@ if __name__ == "__main__":
         xgb_output.to_csv(single_results_dir + 'xgb_output.csv', index=False)
 
     ## resnet results
-    print('resnet')
-    print('read from file')
-    resnet_pred = np.load(single_results_dir + 'resnet_output.npy')
+    # print('resnet')
+    # if os.path.isfile(single_results_dir + 'resnet_output.npy'):
+    #     print('read from file')
+    #     resnet_pred = np.load(single_results_dir + 'resnet_output.npy'.format(name))
+    # else:
+    #     # pytorch format
+    #     train_x_th = torch.from_numpy(train_df_n.values).type(torch.FloatTensor)
+    #     train_y_th = torch.from_numpy(train_y_n).type(torch.FloatTensor)
+    #     train_y_th = train_y_th.view(train_y_th.size()[0], 1)
+    #     train_y_th = torch.from_numpy(train_y_n[:,np.newaxis])
+    #     train = data_utils.TensorDataset(train_x_th, train_y_th)
+    #     train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
+
+    #     model = resnet18_1d(in_channels=1, num_classes=1)
+    #     model.cuda()
+    #     optimizer = optim.Adam(model.parameters(), lr=1.e-4)
+    #     model = resnet_learn(train_loader, model, optimizer, 'prediction')
+    #     resnet_predict = (resnet_pred(model, test_df_n))
+    #     np.save(single_results_dir + 'resnet_output.npy', resnet_predict)
+    #     resnet_output = make_output_month(resnet_predict, train_y_mean, train_y_std, test_id)
+    #     resnet_output.to_csv(single_results_dir + 'resnet_output.csv', index=False)
 
     ## ensenble results
     print('ensemble results')
-    ens_pred = xgb_pred
-    ens_pred += resnet_pred
+    count = -1
+    ens_pred = xgb_pred * ens_weight[count]
+    # ens_pred += resnet_predict
     for name, pred in preds.items():
-        ens_pred += pred
-    ens_pred /= 2 + len(preds)
+        count += 1
+        ens_pred += pred * ens_weight[count]
+    # ens_pred /= 1 + len(preds)
 
     #output
     #ens_output = make_output(ens_pred, train_y_mean, train_y_std, test_id)

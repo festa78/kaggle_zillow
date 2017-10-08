@@ -165,193 +165,166 @@ def make_output_month(pred, train_y_mean, train_y_std, test_id):
     output = output[cols]
     return output
 
-# Define model
-#fc = torch.nn.Linear(W_target.size(0), 1)
-fc = resnet18_1d(in_channels=1, num_classes=1)
-fc.cuda()
+if __name__ == '__main__':
+    # Define model
+    fc = resnet18_1d(in_channels=1, num_classes=1)
+    fc.cuda()
 
-# sample data
-# train_x = []
-# train_y = []
-# for i in range(100):
-#     b_x, b_y = get_batch()
-#     train_x.append(b_x)
-#     train_y.append(b_y)
-# train_x = torch.cat(train_x, dim=0)
-# train_y = torch.cat(train_y, dim=0)
-# print(train_x.size())
-# print(train_y.size())
+    # actual data
+    # preprocessing
+    print('preprocessing')
 
-# actual data
-# preprocessing
-print('preprocessing')
-# train data
-train_df = pd.read_csv("../data/train_2016_v2.csv", parse_dates=["transactiondate"])
+    # train data
+    train_df = pd.read_csv("../data/train_2016_v2.csv", parse_dates=["transactiondate"])
 
-# monthly information
-train_df['transaction_month'] = train_df['transactiondate'].dt.month
+    # monthly information
+    train_df['transaction_month'] = train_df['transactiondate'].dt.month
 
-# property information
-prop_df = pd.read_csv("../data/properties_2016.csv")
+    # property information
+    prop_df = pd.read_csv("../data/properties_2016.csv")
 
-# merge property to data
-train_df = pd.merge(train_df, prop_df, on='parcelid', how='left')
+    # merge property to data
+    train_df = pd.merge(train_df, prop_df, on='parcelid', how='left')
 
-# some manual truncation
-ulimit = np.percentile(train_df.logerror.values, 99)
-llimit = np.percentile(train_df.logerror.values, 1)
-train_df['logerror'].loc[train_df['logerror']>ulimit] = ulimit
-train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
+    # some manual truncation
+    ulimit = np.percentile(train_df.logerror.values, 99)
+    llimit = np.percentile(train_df.logerror.values, 1)
+    train_df['logerror'].loc[train_df['logerror']>ulimit] = ulimit
+    train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
 
-# drop categorical values
-train_y = train_df['logerror'].values
-cat_cols = ["hashottuborspa", "propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
-#train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate', 'transaction_month']+cat_cols, axis=1)
-train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate']+cat_cols, axis=1)
-#train_df = train_df.loc[:, (train_df != train_df.ix[0]).any()]
-train_df = train_df.loc[:, (train_df != train_df.iloc[0]).any()]
-feat_names = train_df.columns
+    # drop categorical values
+    train_y = train_df['logerror'].values
+    cat_cols = ["hashottuborspa", "propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
+    train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate']+cat_cols, axis=1)
+    train_df = train_df.loc[:, (train_df != train_df.iloc[0]).any()]
+    feat_names = train_df.columns
 
-# fill missing values
-mean_values = train_df.mean(axis=0)
-train_df.fillna(mean_values, inplace=True)
+    # fill missing values
+    mean_values = train_df.mean(axis=0)
+    train_df.fillna(mean_values, inplace=True)
 
-# make test dataset
-if os.path.isfile(single_results_dir + 'test_df.pkl'):
-    print('read from file')
+    # make test dataset
+    if os.path.isfile(single_results_dir + 'test_df.pkl'):
+        print('read from file')
+        # read parcelid
+        test_df = pd.read_csv("../data/sample_submission.csv")
+        test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
+        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_id = test_df['parcelid']
 
-    # read parcelid
-    test_df = pd.read_csv("../data/sample_submission.csv")
-    test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
-    test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
-    test_id = test_df['parcelid']
+        # read others
+        test_df = pd.read_pickle(single_results_dir + 'test_df.pkl')
+    else:
+        test_df = pd.read_csv("../data/sample_submission.csv")
+        test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
+        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_id = test_df['parcelid']
+        test_df = test_df.loc[:, feat_names]
+        test_df.fillna(mean_values, inplace=True)
+        # consider monthly estimation
+        test_df_m = []
+        for i in range(test_df.shape[0]):
+            for m in range(10,13):
+                test_tmp = test_df.iloc[i,:]
+                test_tmp['transaction_month'] = m
+                test_df_m.append(test_tmp)
+        test_df = pd.concat(test_df_m, axis=1).T
+        test_df.to_pickle(single_results_dir + 'test_df.pkl')
+    test_df = test_df.reset_index(drop=True)
 
-    # read others
-    test_df = pd.read_pickle(single_results_dir + 'test_df.pkl')
-else:
-    test_df = pd.read_csv("../data/sample_submission.csv")
-    test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
-    test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
-    test_id = test_df['parcelid']
-    test_df = test_df.loc[:, feat_names]
-    test_df.fillna(mean_values, inplace=True)
-    # consider monthly estimation
-    test_df_m = []
-    for i in range(test_df.shape[0]):
-        for m in range(10,13):
-            test_tmp = test_df.iloc[i,:]
-            test_tmp['transaction_month'] = m
-            test_df_m.append(test_tmp)
-    test_df = pd.concat(test_df_m, axis=1).T
-    test_df.to_pickle(single_results_dir + 'test_df.pkl')
-test_df = test_df.reset_index(drop=True)
+    # normalize data
+    train_df_mean = train_df.mean()
+    train_df_std = train_df.std() + 1.0e-9
+    train_y_mean = train_y.mean()
+    train_y_std = train_y.std() + 1.0e-9
+    train_df_n = (train_df - train_df_mean) / train_df_std
+    train_y_n = (train_y - train_y_mean) / train_y_std
+    test_df_n = (test_df - train_df_mean) / train_df_std
 
-#print(test_df.shape)
-# normalize data
-train_df_mean = train_df.mean()
-train_df_std = train_df.std() + 1.0e-9
-train_y_mean = train_y.mean()
-train_y_std = train_y.std() + 1.0e-9
-train_df_n = (train_df - train_df_mean) / train_df_std
-train_y_n = (train_y - train_y_mean) / train_y_std
-test_df_n = (test_df - train_df_mean) / train_df_std
+    train_x_th = torch.from_numpy(train_df_n.values).type(dtype)
+    train_y_th = torch.from_numpy(train_y_n).type(dtype)
+    train_y_th = train_y_th.view(train_y_th.size()[0], 1)
+    train = data_utils.TensorDataset(train_x_th, train_y_th)
+    train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
+    optimizer = optim.Adam(fc.parameters(), lr=1.e-4)
 
-train_x_th = torch.from_numpy(train_df_n.values).type(dtype)
-#test_x_th = torch.from_numpy(test_df_n.values).type(dtype)
-train_y_th = torch.from_numpy(train_y_n).type(dtype)
-train_y_th = train_y_th.view(train_y_th.size()[0], 1)
-#train_y_th = torch.from_numpy(train_y_n[:,np.newaxis])
-train = data_utils.TensorDataset(train_x_th, train_y_th)
-train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
-optimizer = optim.Adam(fc.parameters(), lr=1.e-4)
-# for batch_idx in count(1):
-num_epoch = 10000
-save_epoch = 100
-start_epoch = 0
-single_results_dir = './single_model_results/'
-save_path = 'dnn_results/'
-loss_best = float("Inf")
+    num_epoch = 10000
+    save_epoch = 100
+    start_epoch = 0
+    single_results_dir = './single_model_results/'
+    save_path = 'dnn_results/'
+    loss_best = float("Inf")
 
-# resume
-lt = glob.glob(save_path + 'ckpt_*')
-if lt:
-    print('resume')
-    lt.sort(key=natural_keys)
-    load_status = torch.load(lt[-1])
-    start_epoch = load_status['epoch'] - 1
-    fc.load_state_dict(load_status['state_dict'])
-    model_best = load_status['model_best']
-    optimizer.load_state_dict(load_status['optimizer'])
+    # resume
+    lt = glob.glob(save_path + 'ckpt_*')
+    if lt:
+        print('resume')
+        lt.sort(key=natural_keys)
+        load_status = torch.load(lt[-1])
+        start_epoch = load_status['epoch'] - 1
+        fc.load_state_dict(load_status['state_dict'])
+        model_best = load_status['model_best']
+        optimizer.load_state_dict(load_status['optimizer'])
 
-for ep in range(start_epoch, num_epoch):
-    loss_total = 0.
-    batch_total = np.ceil(len(train_loader.dataset) / train_loader.batch_size).astype('int')
-    _tqdm = dict(total=batch_total)
-    for batch_idx, (batch_x, batch_y) in tqdm(enumerate(train_loader), **_tqdm):
-        # Get data
-        # batch_x, batch_y = get_batch()
-        batch_x = Variable(batch_x.cuda())
-        batch_y = Variable(batch_y.cuda())
-        #batch_x = Variable(batch_x)
-        #batch_y = Variable(batch_y)
-
-        # Reset gradients
-        fc.zero_grad()
-
-        # Forward pass
-        batch_x = batch_x.view(batch_x.size()[0],batch_x.size()[1],1)
-        batch_x = batch_x.permute(0,2,1)
-        batch_y = batch_y.view(batch_y.size()[0],batch_y.size()[1],1)
-        #batch_y = batch_y.view(batch_y.size()[0], 1, 1)
-        batch_y = batch_y.permute(0,2,1)
-        output = F.smooth_l1_loss(fc(batch_x), batch_y)
-        loss = output.data[0]
-
-        # Backward pass
-        output.backward()
-
-        # Apply gradients
-        optimizer.step()
-        # for param in fc.parameters():
-        #     param.data.add_(-1.e-4 * param.grad.data)
-
-        loss_total += loss
-        # Stop criterion
-        # print(loss)
-        # if loss < 1e-3:
-        #     break
-    # save model
-    if (ep + 1) % save_epoch == 0:
-        print('model save')
-        if loss < loss_best:
-            loss_best = loss
-            model_best = fc
-        save_status = {
-            'epoch': ep + 1,
-            'state_dict': fc.state_dict(),
-            'model_best': model_best,
-            'optimizer' : optimizer.state_dict(),
-        }
-        torch.save(save_status, save_path + 'ckpt_{:08d}.pth.tar'.format(ep))
-        print('test data')
-        pred_all = np.zeros((test_df_n.shape[0], 1))
-        test_batch_size = 30
-        batch_total = np.ceil(pred_all.shape[0] / test_batch_size).astype('int')
+    for ep in range(start_epoch, num_epoch):
+        loss_total = 0.
+        batch_total = np.ceil(len(train_loader.dataset) / train_loader.batch_size).astype('int')
         _tqdm = dict(total=batch_total)
-        for bid in tqdm(range(0, pred_all.shape[0], test_batch_size)):
-            test_x_th = torch.from_numpy(test_df_n.values[bid:min(bid+test_batch_size, pred_all.shape[0]),]).type(dtype)
-            test_x_th = Variable(test_x_th.cuda())
-            test_x_th = test_x_th.view(test_x_th.size()[0], test_x_th.size()[1], 1)
-            test_x_th = test_x_th.permute(0,2,1)
-            pred = fc(test_x_th).cpu().data.numpy()
-            pred_all[bid:min(bid+test_batch_size, pred_all.shape[0])] = pred
-        print('pred', pred_all.shape)
-        pred_all = np.squeeze(pred_all)
-        np.save(single_results_dir + 'resnet_output.npy', pred_all)
-        output = make_output_month(pred_all, train_y_mean, train_y_std, test_id)
-        output.to_csv('./dnn_results/submission.csv', index=False)
+        for batch_idx, (batch_x, batch_y) in tqdm(enumerate(train_loader), **_tqdm):
+            # Get data
+            batch_x = Variable(batch_x.cuda())
+            batch_y = Variable(batch_y.cuda())
 
-    loss_total /= float(batch_total)
-    print('Loss: {:.6f} after {} epochs'.format(loss_total, ep))
+            # Reset gradients
+            fc.zero_grad()
+
+            # Forward pass
+            batch_x = batch_x.view(batch_x.size()[0],batch_x.size()[1],1)
+            batch_x = batch_x.permute(0,2,1)
+            batch_y = batch_y.view(batch_y.size()[0],batch_y.size()[1],1)
+            batch_y = batch_y.permute(0,2,1)
+            output = F.smooth_l1_loss(fc(batch_x), batch_y)
+            loss = output.data[0]
+
+            # Backward pass
+            output.backward()
+
+            # Apply gradients
+            optimizer.step()
+
+            loss_total += loss
+        # save model
+        if (ep + 1) % save_epoch == 0:
+            print('model save')
+            if loss < loss_best:
+                loss_best = loss
+                model_best = fc
+            save_status = {
+                'epoch': ep + 1,
+                'state_dict': fc.state_dict(),
+                'model_best': model_best,
+                'optimizer' : optimizer.state_dict(),
+            }
+            torch.save(save_status, save_path + 'ckpt_{:08d}.pth.tar'.format(ep))
+            print('test data')
+            pred_all = np.zeros((test_df_n.shape[0], 1))
+            test_batch_size = 30
+            batch_total = np.ceil(pred_all.shape[0] / test_batch_size).astype('int')
+            _tqdm = dict(total=batch_total)
+            for bid in tqdm(range(0, pred_all.shape[0], test_batch_size)):
+                test_x_th = torch.from_numpy(test_df_n.values[bid:min(bid+test_batch_size, pred_all.shape[0]),]).type(dtype)
+                test_x_th = Variable(test_x_th.cuda())
+                test_x_th = test_x_th.view(test_x_th.size()[0], test_x_th.size()[1], 1)
+                test_x_th = test_x_th.permute(0,2,1)
+                pred = fc(test_x_th).cpu().data.numpy()
+                pred_all[bid:min(bid+test_batch_size, pred_all.shape[0])] = pred
+            print('pred', pred_all.shape)
+            pred_all = np.squeeze(pred_all)
+            np.save(single_results_dir + 'resnet_output.npy', pred_all)
+            output = make_output_month(pred_all, train_y_mean, train_y_std, test_id)
+            output.to_csv('./dnn_results/submission.csv', index=False)
+
+        loss_total /= float(batch_total)
+        print('Loss: {:.6f} after {} epochs'.format(loss_total, ep))
 
 
