@@ -29,6 +29,7 @@ import torch.optim as optim
 import torch.utils.data as data_utils
 import torchvision.models as models
 from torch.autograd import Variable
+import lightgbm as lgb
 
 #from sklearn.linear_model import RidgeCV
 from main_dnn import resnet18_1d
@@ -252,6 +253,45 @@ if __name__ == "__main__":
         #"kernel_ridge": KernelRidge(alpha=1.0),
     }
 
+    lightgbm_params = {
+        'max_bin': 10,
+        'learning_rate': 0.0021,
+        'boosting_type': 'gbdt',
+        'objective': 'regression',
+        'metric': 'l1',
+        'sub_feature': 0.345,
+        'bagging_fraction': 0.85,
+        'bagging_freq': 40,
+        'num_leaves': 512,
+        'min_data': 500,
+        'min_hessian': 0.05,
+        'verbose': 0,
+        'feature_fraction_seed': 2,
+        'bagging_seed': 2,
+    }
+
+    xgb_params1 = {
+        'eta': 0.037,
+        'max_depth': 5,
+        'subsample': 0.8,
+        'objective': 'reg:linear',
+        'eval_metric': 'mae',
+        'lambda': 0.8,
+        'alpha': 0.4,
+        'silent': 1,
+        'seed' : 0
+    }
+
+    xgb_params2 = {
+        'eta': 0.033,
+        'max_depth': 6,
+        'subsample': 0.8,
+        'objective': 'reg:linear',
+        'eval_metric': 'mae',
+        'silent': 1,
+        'seed' : 0
+    }
+
     # stacking approach
     print('train data stacking')
     if os.path.isfile(single_results_dir + 'train_features_output.npy'):
@@ -262,7 +302,7 @@ if __name__ == "__main__":
         rs = KFold(n_splits=5)
 
         # feature extraction
-        train_features = np.zeros([train_df_n.shape[0], len(ESTIMATORS) + 1])
+        train_features = np.zeros([train_df_n.shape[0], len(ESTIMATORS) + 3])
         count = 0
         # for train_id_s, test_id_s in split_id:
         for train_id_s, test_id_s in rs.split(train_df_n):
@@ -275,26 +315,33 @@ if __name__ == "__main__":
             for name, estimator in ESTIMATORS.items():
                 print(name)
                 stime = time.time()
-                estimator.fit(train_df_s.as_matrix(), train_y_s)
+                estimator.fit(train_df_s.values, train_y_s)
                 print("Time for {} fitting: {:03f}".format(name, time.time() - stime))
-                pred = estimator.predict(test_df_s)
+                pred = estimator.predict(test_df_s.values)
                 preds_s.append(pred)
 
+            # lightgbm
+            print('lightgbm')
+            dtrain = lgb.Dataset(train_df_s.values, label=train_y_s)
+            stime = time.time()
+            lgbm_model = lgb.train(lightgbm_params, dtrain, 430)
+            print("Time for lightgbm fitting: {:03f}".format(time.time() - stime))
+            preds_s.append(lgbm_model.predict(test_df_s.values))
+
             # xgboost
-            print('xgboost')
-            xgb_params = {
-                'eta': 0.05,
-                'max_depth': 8,
-                'subsample': 0.7,
-                'colsample_bytree': 0.7,
-                'objective': 'reg:linear',
-                'silent': 1,
-                'seed' : 0
-            }
+            print('xgboost1')
             dtrain = xgb.DMatrix(train_df_s, train_y_s, feature_names=train_df.columns.values)
             dtest = xgb.DMatrix(test_df_s)
             stime = time.time()
-            xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
+            xgb_model = xgb.train(dict(xgb_params1), dtrain, num_boost_round=50)
+            print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
+            preds_s.append(xgb_model.predict(dtest))
+
+            print('xgboost2')
+            dtrain = xgb.DMatrix(train_df_s, train_y_s, feature_names=train_df.columns.values)
+            dtest = xgb.DMatrix(test_df_s)
+            stime = time.time()
+            xgb_model = xgb.train(dict(xgb_params2), dtrain, num_boost_round=50)
             print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
             preds_s.append(xgb_model.predict(dtest))
 
@@ -329,7 +376,7 @@ if __name__ == "__main__":
     ens_weight = lr.coef_
     print('feature size', train_features.shape)
     print('ens_weight size', ens_weight.shape[0])
-    assert(ens_weight.shape[0] == len(ESTIMATORS) + 1)
+    assert(ens_weight.shape[0] == len(ESTIMATORS) + 3)
 
     print('test data stacking')
     if os.path.isfile(single_results_dir + 'test_features_output.npy'):
@@ -341,45 +388,51 @@ if __name__ == "__main__":
         for name, estimator in ESTIMATORS.items():
             print(name)
             stime = time.time()
-            estimator.fit(train_df_n.as_matrix(), train_y_n)
+            estimator.fit(train_df_n.values, train_y_n)
             print("Time for {} fitting: {:03f}".format(name, time.time() - stime))
-            pred = estimator.predict(test_df_n)
+            pred = estimator.predict(test_df_n.values)
             preds_s.append(pred)
 
+        # lightgbm
+        print('lightgbm')
+        dtrain = lgb.Dataset(train_df_n.values, label=train_y_n)
+        stime = time.time()
+        lgbm_model = lgb.train(lightgbm_params, dtrain, 430)
+        print("Time for lightgbm fitting: {:03f}".format(time.time() - stime))
+        preds_s.append(lgbm_model.predict(test_df_n.values))
+
         # xgboost
-        print('xgboost')
-        xgb_params = {
-            'eta': 0.05,
-            'max_depth': 8,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'objective': 'reg:linear',
-            'silent': 1,
-            'seed' : 0
-        }
-        dtrain = xgb.DMatrix(train_df_n, train_y_n)
+        print('xgboost1')
+        dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df.columns.values)
         dtest = xgb.DMatrix(test_df_n)
         stime = time.time()
-        xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
+        xgb_model = xgb.train(dict(xgb_params1), dtrain, num_boost_round=50)
         print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
-        pred = xgb_model.predict(dtest)
-        preds_s.append(pred)
+        preds_s.append(xgb_model.predict(dtest))
+
+        print('xgboost2')
+        dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df.columns.values)
+        dtest = xgb.DMatrix(test_df_n)
+        stime = time.time()
+        xgb_model = xgb.train(dict(xgb_params2), dtrain, num_boost_round=50)
+        print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
+        preds_s.append(xgb_model.predict(dtest))
 
         # resnet
-        print('resnet')
-        # pytorch format
-        train_x_th = torch.from_numpy(train_df_n.values).type(torch.FloatTensor)
-        train_y_th = torch.from_numpy(train_y_n).type(torch.FloatTensor)
-        train_y_th = train_y_th.view(train_y_th.size()[0], 1)
-        train_y_th = torch.from_numpy(train_y_n[:,np.newaxis])
-        train = data_utils.TensorDataset(train_x_th, train_y_th)
-        train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
+        # print('resnet')
+        # # pytorch format
+        # train_x_th = torch.from_numpy(train_df_n.values).type(torch.FloatTensor)
+        # train_y_th = torch.from_numpy(train_y_n).type(torch.FloatTensor)
+        # train_y_th = train_y_th.view(train_y_th.size()[0], 1)
+        # train_y_th = torch.from_numpy(train_y_n[:,np.newaxis])
+        # train = data_utils.TensorDataset(train_x_th, train_y_th)
+        # train_loader = data_utils.DataLoader(train, batch_size=1000, shuffle=True)
 
-        model = resnet18_1d(in_channels=1, num_classes=1)
-        model.cuda()
-        optimizer = optim.Adam(model.parameters(), lr=1.e-4)
-        model = resnet_learn(train_loader, model, optimizer, 'test_feature')
-        preds_s.append(resnet_pred(model, test_df_n))
+        # model = resnet18_1d(in_channels=1, num_classes=1)
+        # model.cuda()
+        # optimizer = optim.Adam(model.parameters(), lr=1.e-4)
+        # model = resnet_learn(train_loader, model, optimizer, 'test_feature')
+        # preds_s.append(resnet_pred(model, test_df_n))
 
         preds_s = np.stack(preds_s, axis=1)
         for idx in range(preds_s.shape[0]):
@@ -402,9 +455,9 @@ if __name__ == "__main__":
             preds[name] = np.load(single_results_dir + '{}_output.npy'.format(name))
         else:
             stime = time.time()
-            estimator.fit(train_df_n.as_matrix(), train_y_n)
+            estimator.fit(train_df_n.values, train_y_n)
             print("Time for {} fitting: {:03f}".format(name, time.time() - stime))
-            preds[name] = estimator.predict(test_df_n)
+            preds[name] = estimator.predict(test_df_n.values)
 
             #output
             np.save(single_results_dir + '{}_output.npy'.format(name), preds[name])
@@ -412,34 +465,60 @@ if __name__ == "__main__":
             output = make_output_month(preds[name], train_y_mean, train_y_std, test_id)
             output.to_csv(single_results_dir + '{}_output.csv'.format(name), index=False)
 
-    # xgboost
-    print('xgboost')
-    if os.path.isfile(single_results_dir + 'xgb_output.npy'):
+    print('lightgbm')
+    if os.path.isfile(single_results_dir + 'lightgbm_output.npy'):
         print('read from file')
-        xgb_pred = np.load(single_results_dir + 'xgb_output.npy'.format(name))
+        lgbm_pred = np.load(single_results_dir + 'lightgbm_output.npy'.format(name))
     else:
-        xgb_params = {
-            'eta': 0.05,
-            'max_depth': 8,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'objective': 'reg:linear',
-            'silent': 1,
-            'seed' : 0
-        }
+        dtrain = lgb.Dataset(train_df_n.values, label=train_y_n)
+        stime = time.time()
+        lgbm_model = lgb.train(lightgbm_params, dtrain, 430)
+        print("Time for lightgbm fitting: {:03f}".format(time.time() - stime))
+        lgbm_pred = lgbm_model.predict(test_df_n.values)
+
+        #output
+        np.save(single_results_dir + 'lgbm_output.npy', lgbm_pred)
+        lgbm_output = make_output_month(lgbm_pred, train_y_mean, train_y_std, test_id)
+        lgbm_output.to_csv(single_results_dir + 'lgbm_output.csv', index=False)
+
+    # xgboost
+    print('xgboost1')
+    if os.path.isfile(single_results_dir + 'xgb1_output.npy'):
+        print('read from file')
+        xgb1_pred = np.load(single_results_dir + 'xgb1_output.npy'.format(name))
+    else:
         dtrain = xgb.DMatrix(train_df_n, train_y_n)
         # dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df_n.columns.values)
         dtest = xgb.DMatrix(test_df_n)
         stime = time.time()
-        xgb_model = xgb.train(dict(xgb_params, silent=0), dtrain, num_boost_round=50)
-        print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
-        xgb_pred = xgb_model.predict(dtest)
+        xgb1_model = xgb.train(dict(xgb_params1, silent=0), dtrain, num_boost_round=50)
+        print("Time for xgboost1 fitting: {:03f}".format(time.time() - stime))
+        xgb1_pred = xgb1_model.predict(dtest)
 
         #output
-        np.save(single_results_dir + 'xgb_output.npy', xgb_pred)
+        np.save(single_results_dir + 'xgb1_output.npy', xgb1_pred)
         #xgb_output = make_output(xgb_pred, train_y_mean, train_y_std, test_id)
-        xgb_output = make_output_month(xgb_pred, train_y_mean, train_y_std, test_id)
-        xgb_output.to_csv(single_results_dir + 'xgb_output.csv', index=False)
+        xgb1_output = make_output_month(xgb1_pred, train_y_mean, train_y_std, test_id)
+        xgb1_output.to_csv(single_results_dir + 'xgb1_output.csv', index=False)
+
+    print('xgboost2')
+    if os.path.isfile(single_results_dir + 'xgb2_output.npy'):
+        print('read from file')
+        xgb2_pred = np.load(single_results_dir + 'xgb2_output.npy'.format(name))
+    else:
+        dtrain = xgb.DMatrix(train_df_n, train_y_n)
+        # dtrain = xgb.DMatrix(train_df_n, train_y_n, feature_names=train_df_n.columns.values)
+        dtest = xgb.DMatrix(test_df_n)
+        stime = time.time()
+        xgb2_model = xgb.train(dict(xgb_params1, silent=0), dtrain, num_boost_round=50)
+        print("Time for xgboost2 fitting: {:03f}".format(time.time() - stime))
+        xgb2_pred = xgb2_model.predict(dtest)
+
+        #output
+        np.save(single_results_dir + 'xgb2_output.npy', xgb2_pred)
+        #xgb_output = make_output(xgb_pred, train_y_mean, train_y_std, test_id)
+        xgb2_output = make_output_month(xgb2_pred, train_y_mean, train_y_std, test_id)
+        xgb2_output.to_csv(single_results_dir + 'xgb2_output.csv', index=False)
 
     ## resnet results
     # print('resnet')
@@ -466,8 +545,12 @@ if __name__ == "__main__":
 
     ## ensenble results
     print('ensemble results')
-    count = -1
-    ens_pred = xgb_pred * ens_weight[count]
+    count = -3
+    ens_pred = lgbm_pred * ens_weight[count]
+    count += 1
+    ens_pred = xgb1_pred * ens_weight[count]
+    count += 1
+    ens_pred = xgb2_pred * ens_weight[count]
     # ens_pred += resnet_predict
     for name, pred in preds.items():
         count += 1
