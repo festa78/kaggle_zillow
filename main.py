@@ -181,22 +181,25 @@ if __name__ == "__main__":
     train_df = pd.merge(train_df, prop_df, on='parcelid', how='left')
 
     # some manual truncation
-    ulimit = np.percentile(train_df.logerror.values, 99)
-    llimit = np.percentile(train_df.logerror.values, 1)
+    # ulimit = np.percentile(train_df.logerror.values, 99)
+    # llimit = np.percentile(train_df.logerror.values, 1)
+    ulimit = 0.419
+    llimit = -0.4
     train_df['logerror'].loc[train_df['logerror']>ulimit] = ulimit
     train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
 
     # drop categorical values
     train_y = train_df['logerror'].values
     cat_cols = ["hashottuborspa", "propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
+    #cat_cols = ["propertycountylandusecode", "propertyzoningdesc", "fireplaceflag", "taxdelinquencyflag"]
     #train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate', 'transaction_month']+cat_cols, axis=1)
     train_df = train_df.drop(['parcelid', 'logerror', 'transactiondate']+cat_cols, axis=1)
     #train_df = train_df.loc[:, (train_df != train_df.ix[0]).any()]
-    train_df = train_df.loc[:, (train_df != train_df.iloc[0]).any()]
+    #train_df = train_df.loc[:, (train_df != train_df.iloc[0]).any()]
     feat_names = train_df.columns
 
     # fill missing values
-    mean_values = train_df.mean(axis=0)
+    mean_values = train_df.median(axis=0)
     train_df.fillna(mean_values, inplace=True)
 
     # make test dataset
@@ -263,7 +266,7 @@ if __name__ == "__main__":
         'bagging_fraction': 0.85,
         'bagging_freq': 40,
         'num_leaves': 512,
-        'min_data': 500,
+        'min_data': 10,
         'min_hessian': 0.05,
         'verbose': 0,
         'feature_fraction_seed': 2,
@@ -333,7 +336,7 @@ if __name__ == "__main__":
             dtrain = xgb.DMatrix(train_df_s, train_y_s, feature_names=train_df.columns.values)
             dtest = xgb.DMatrix(test_df_s)
             stime = time.time()
-            xgb_model = xgb.train(dict(xgb_params1), dtrain, num_boost_round=50)
+            xgb_model = xgb.train(dict(xgb_params1), dtrain, num_boost_round=250)
             print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
             preds_s.append(xgb_model.predict(dtest))
 
@@ -341,7 +344,7 @@ if __name__ == "__main__":
             dtrain = xgb.DMatrix(train_df_s, train_y_s, feature_names=train_df.columns.values)
             dtest = xgb.DMatrix(test_df_s)
             stime = time.time()
-            xgb_model = xgb.train(dict(xgb_params2), dtrain, num_boost_round=50)
+            xgb_model = xgb.train(dict(xgb_params2), dtrain, num_boost_round=150)
             print("Time for xgboost fitting: {:03f}".format(time.time() - stime))
             preds_s.append(xgb_model.predict(dtest))
 
@@ -443,10 +446,10 @@ if __name__ == "__main__":
 
     ## learning
     print('learning')
-    # train_df_n = pd.concat([train_df_n, train_features], axis=1)
-    # test_df_n = pd.concat([test_df_n, test_features], axis=1)
-    train_df_n = train_features
-    test_df_n = test_features
+    train_df_n = pd.concat([train_df_n, train_features], axis=1)
+    test_df_n = pd.concat([test_df_n, test_features], axis=1)
+    # train_df_n = train_features
+    # test_df_n = test_features
     preds = dict()
     for name, estimator in ESTIMATORS.items():
         print(name)
