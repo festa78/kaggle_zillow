@@ -169,24 +169,35 @@ if __name__ == "__main__":
     print('preprocessing')
 
     # train data
-    train_df = pd.read_csv("../data/train_2016_v2.csv", parse_dates=["transactiondate"])
+    train_df_1 = pd.read_csv("../data/train_2016_v2.csv", parse_dates=["transactiondate"])
+    train_df_2 = pd.read_csv("../data/train_2017.csv", parse_dates=["transactiondate"])
 
     # monthly information
-    train_df['transaction_month'] = train_df['transactiondate'].dt.month
+    train_df_1['transaction_month'] = train_df_1['transactiondate'].dt.month
+    train_df_2['transaction_month'] = train_df_2['transactiondate'].dt.month
 
     # property information
-    prop_df = pd.read_csv("../data/properties_2016.csv")
+    prop_df_1 = pd.read_csv("../data/properties_2016.csv")
+    prop_df_2 = pd.read_csv("../data/properties_2017.csv")
 
     # merge property to data
-    train_df = pd.merge(train_df, prop_df, on='parcelid', how='left')
+    train_df_1 = pd.merge(train_df_1, prop_df_1, on='parcelid', how='left')
+    train_df_2 = pd.merge(train_df_2, prop_df_2, on='parcelid', how='left')
 
     # some manual truncation
     # ulimit = np.percentile(train_df.logerror.values, 99)
     # llimit = np.percentile(train_df.logerror.values, 1)
     ulimit = 0.419
     llimit = -0.4
-    train_df['logerror'].loc[train_df['logerror']>ulimit] = ulimit
-    train_df['logerror'].loc[train_df['logerror']<llimit] = llimit
+    train_df_1['logerror'].loc[train_df_1['logerror']>ulimit] = ulimit
+    train_df_1['logerror'].loc[train_df_1['logerror']<llimit] = llimit
+    train_df_2['logerror'].loc[train_df_2['logerror']>ulimit] = ulimit
+    train_df_2['logerror'].loc[train_df_2['logerror']<llimit] = llimit
+
+    train_df = pd.concat((train_df_1, train_df_2), axis=0)
+    print(train_df_1.shape)
+    print(train_df_2.shape)
+    print(train_df.shape)
 
     # drop categorical values
     train_y = train_df['logerror'].values
@@ -209,7 +220,7 @@ if __name__ == "__main__":
         # read parcelid
         test_df = pd.read_csv("../data/sample_submission.csv")
         test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
-        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_df = pd.merge(test_df, prop_df_1, on='parcelid', how='left')
         test_id = test_df['parcelid']
 
         # read others
@@ -217,7 +228,7 @@ if __name__ == "__main__":
     else:
         test_df = pd.read_csv("../data/sample_submission.csv")
         test_df.rename(columns={'ParcelId':'parcelid'}, inplace=True)
-        test_df = pd.merge(test_df, prop_df, on='parcelid', how='left')
+        test_df = pd.merge(test_df, prop_df_1, on='parcelid', how='left')
         test_id = test_df['parcelid']
         test_df = test_df.loc[:, feat_names]
         test_df.fillna(mean_values, inplace=True)
