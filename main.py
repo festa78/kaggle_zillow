@@ -457,10 +457,10 @@ if __name__ == "__main__":
 
     ## learning
     print('learning')
-    train_df_n = pd.concat([train_df_n, train_features], axis=1)
-    test_df_n = pd.concat([test_df_n, test_features], axis=1)
-    # train_df_n = train_features
-    # test_df_n = test_features
+    # train_df_n = pd.concat([train_df_n, train_features], axis=1)
+    # test_df_n = pd.concat([test_df_n, test_features], axis=1)
+    train_df_n = train_features
+    test_df_n = test_features
     preds = dict()
     for name, estimator in ESTIMATORS.items():
         print(name)
